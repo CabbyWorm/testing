@@ -93,7 +93,13 @@ static struct {
     sg_bindings bind;
     sg_pass_action pass_action;
     float rx, ry;
+    bool dragging;
+    bool user_interacted;
+    float last_x, last_y;
+    uintptr_t touch_id;
 } state;
+
+static const float DRAG_SENSITIVITY = 0.01f;
 
 static const char *vs_src =
     "#version 300 es\n"
@@ -215,10 +221,75 @@ static void init(void) {
     };
 }
 
+static void drag_start(float x, float y) {
+    state.dragging = true;
+    state.user_interacted = true;
+    state.last_x = x;
+    state.last_y = y;
+}
+
+static void drag_move(float x, float y) {
+    if (!state.dragging) return;
+    state.ry += (x - state.last_x) * DRAG_SENSITIVITY;
+    state.rx += (y - state.last_y) * DRAG_SENSITIVITY;
+    state.last_x = x;
+    state.last_y = y;
+}
+
+static void drag_end(void) {
+    state.dragging = false;
+}
+
+static void event(const sapp_event *e) {
+    switch (e->type) {
+        case SAPP_EVENTTYPE_MOUSE_DOWN:
+            if (e->mouse_button == SAPP_MOUSEBUTTON_LEFT) {
+                drag_start(e->mouse_x, e->mouse_y);
+            }
+            break;
+        case SAPP_EVENTTYPE_MOUSE_MOVE:
+            drag_move(e->mouse_x, e->mouse_y);
+            break;
+        case SAPP_EVENTTYPE_MOUSE_UP:
+            if (e->mouse_button == SAPP_MOUSEBUTTON_LEFT) drag_end();
+            break;
+        case SAPP_EVENTTYPE_MOUSE_LEAVE:
+            drag_end();
+            break;
+        case SAPP_EVENTTYPE_TOUCHES_BEGAN:
+            if (e->num_touches > 0) {
+                state.touch_id = e->touches[0].identifier;
+                drag_start(e->touches[0].pos_x, e->touches[0].pos_y);
+            }
+            break;
+        case SAPP_EVENTTYPE_TOUCHES_MOVED:
+            for (int i = 0; i < e->num_touches; i++) {
+                if (e->touches[i].identifier == state.touch_id) {
+                    drag_move(e->touches[i].pos_x, e->touches[i].pos_y);
+                    break;
+                }
+            }
+            break;
+        case SAPP_EVENTTYPE_TOUCHES_ENDED:
+        case SAPP_EVENTTYPE_TOUCHES_CANCELLED:
+            for (int i = 0; i < e->num_touches; i++) {
+                if (e->touches[i].identifier == state.touch_id) {
+                    drag_end();
+                    break;
+                }
+            }
+            break;
+        default:
+            break;
+    }
+}
+
 static void frame(void) {
     const float dt = (float)sapp_frame_duration();
-    state.rx += 1.0f * dt;
-    state.ry += 1.4f * dt;
+    if (!state.user_interacted) {
+        state.rx += 1.0f * dt;
+        state.ry += 1.4f * dt;
+    }
 
     const float aspect = sapp_widthf() / sapp_heightf();
     mat4 proj = mat4_perspective(60.0f * 3.14159265f / 180.0f, aspect, 0.01f, 100.0f);
@@ -249,6 +320,7 @@ sapp_desc sokol_main(int argc, char *argv[]) {
     return (sapp_desc){
         .init_cb = init,
         .frame_cb = frame,
+        .event_cb = event,
         .cleanup_cb = cleanup,
         .width = 800,
         .height = 600,
