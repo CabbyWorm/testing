@@ -1,0 +1,6 @@
+build/
+emsdk-cache/
+*.o
+*.wasm
+*.js.map
+.DS_Store
