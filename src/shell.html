@@ -34,11 +34,31 @@
       letter-spacing: 0.5px;
     }
     #status.hidden { opacity: 0; }
+    #motion-gate {
+      position: fixed;
+      bottom: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      padding: 10px 14px;
+      background: rgba(15, 18, 24, 0.92);
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      border-radius: 8px;
+      color: #d8e0e6;
+      font-size: 13px;
+      letter-spacing: 0.4px;
+      cursor: pointer;
+      z-index: 10;
+      transition: opacity 250ms ease;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #motion-gate:active { background: rgba(35, 40, 52, 0.95); }
+    #motion-gate.hidden { opacity: 0; pointer-events: none; }
   </style>
 </head>
 <body>
   <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
   <div id="status">computing your fractal…</div>
+  <button id="motion-gate" class="hidden" type="button">tap to enable shake-to-switch</button>
 
   <script>
     // Per-client fingerprint -> 32-bit seed, written into the URL query string
@@ -115,12 +135,17 @@
     };
 
     // Shake the device -> jump to a new fractal. Calls into the wasm-exported
-    // next_fractal() once the runtime is up. iOS Safari requires a user gesture
-    // before DeviceMotionEvent.requestPermission() can be called, so we attach
-    // permission-request to the first tap.
+    // next_fractal() once the runtime is up. iOS Safari requires
+    // DeviceMotionEvent.requestPermission() to be invoked from the click
+    // handler of an explicit user-tapped element — Sokol's canvas eats the
+    // touchstart before it bubbles, so we use a small dedicated button.
     (function () {
+      var gateEl = document.getElementById('motion-gate');
       var lastA = null;
       var lastShakeAt = 0;
+      var attached = false;
+      var SHAKE_THRESHOLD = 22;       // m/s^2 magnitude on the per-event delta
+      var SHAKE_DEBOUNCE_MS = 700;
       function onMotion(e) {
         var a = e.accelerationIncludingGravity || e.acceleration;
         if (!a || a.x == null) return;
@@ -128,7 +153,7 @@
           var dx = a.x - lastA.x, dy = a.y - lastA.y, dz = a.z - lastA.z;
           var delta = Math.sqrt(dx*dx + dy*dy + dz*dz);
           var now = Date.now();
-          if (delta > 28 && now - lastShakeAt > 700) {
+          if (delta > SHAKE_THRESHOLD && now - lastShakeAt > SHAKE_DEBOUNCE_MS) {
             lastShakeAt = now;
             try { if (Module && Module._next_fractal) Module._next_fractal(); }
             catch (err) { console.error(err); }
@@ -137,21 +162,35 @@
         lastA = { x: a.x, y: a.y, z: a.z };
       }
       function attach() {
+        if (attached) return;
+        attached = true;
         window.addEventListener('devicemotion', onMotion, { passive: true });
+        gateEl.classList.add('hidden');
+        console.log('[fractal] devicemotion listener attached');
       }
-      function enable() {
-        if (typeof DeviceMotionEvent === 'undefined') return;
-        if (typeof DeviceMotionEvent.requestPermission === 'function') {
-          DeviceMotionEvent.requestPermission()
-            .then(function (r) { if (r === 'granted') attach(); })
-            .catch(function () {});
-        } else {
-          attach();
-        }
+      var hasMotion = typeof DeviceMotionEvent !== 'undefined';
+      var needsPermission = hasMotion && typeof DeviceMotionEvent.requestPermission === 'function';
+      if (!hasMotion) {
+        // No DeviceMotion at all (desktop without sensor, etc.). Nothing to do.
+      } else if (!needsPermission) {
+        // Android, older iOS — listener can be attached unconditionally.
+        attach();
+      } else {
+        // iOS 13+. requestPermission must run inside a real user click.
+        gateEl.classList.remove('hidden');
+        gateEl.addEventListener('click', function () {
+          DeviceMotionEvent.requestPermission().then(function (r) {
+            if (r === 'granted') {
+              attach();
+            } else {
+              gateEl.textContent = 'motion access denied — check Safari → Motion settings';
+            }
+          }).catch(function (err) {
+            console.error('[fractal] requestPermission rejected:', err);
+            gateEl.textContent = 'could not enable motion';
+          });
+        });
       }
-      // Safe to attach without permission on Android/desktop; iOS needs a tap.
-      enable();
-      window.addEventListener('touchstart', enable, { once: true, passive: true });
     })();
   </script>
   {{{ SCRIPT }}}
