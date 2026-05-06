@@ -187,7 +187,7 @@ static void apply_url_overrides(fs_params_t *p) {
 }
 
 static void init(void) {
-    sargs_setup(&(sargs_desc){ .logger.func = slog_func });
+    sargs_setup(&(sargs_desc){ 0 });
     sg_setup(&(sg_desc){ .environment = sglue_environment(), .logger.func = slog_func });
     sdtx_setup(&(sdtx_desc_t){
         .fonts = { [0] = sdtx_font_kc853() },
