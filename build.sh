@@ -9,6 +9,7 @@ mkdir -p "$OUT_DIR"
 
 emcc "$ROOT_DIR/src/main.c" \
   -I"$ROOT_DIR/third_party/sokol" \
+  -I"$ROOT_DIR/third_party/sokol/util" \
   -DSOKOL_GLES3 \
   -O2 \
   -std=c99 \

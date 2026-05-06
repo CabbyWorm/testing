@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
-  <title>Sokol cube on WASM</title>
+  <title>your sokol fractal</title>
   <style>
     html, body {
       margin: 0;
@@ -11,7 +11,7 @@
       width: 100%;
       height: 100%;
       overflow: hidden;
-      background: #121316;
+      background: #05060a;
       color: #d8d8d8;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
     }
@@ -38,11 +38,62 @@
 </head>
 <body>
   <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
-  <div id="status">loading…</div>
+  <div id="status">computing your fractal…</div>
 
   <script>
+    // Per-client fingerprint -> 32-bit seed, written into the URL query string
+    // so sokol_args can read it on the C side. If a `seed` param is already
+    // present (shared link) we leave it alone.
+    function cyrb53(str, seed) {
+      var h1 = 0xdeadbeef ^ (seed >>> 0);
+      var h2 = 0x41c6ce57 ^ (seed >>> 0);
+      for (var i = 0; i < str.length; i++) {
+        var ch = str.charCodeAt(i);
+        h1 = Math.imul(h1 ^ ch, 2654435761);
+        h2 = Math.imul(h2 ^ ch, 1597334677);
+      }
+      h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+      h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+      return (h1 >>> 0);
+    }
+
+    function gpuShortName() {
+      try {
+        var c = document.createElement('canvas');
+        var gl = c.getContext('webgl2') || c.getContext('webgl');
+        if (!gl) return 'no-webgl';
+        var ext = gl.getExtension('WEBGL_debug_renderer_info');
+        var raw = ext ? (gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) || '') : '';
+        if (!raw) return 'unknown-gpu';
+        var m = raw.match(/ANGLE \(([^,]+),\s*([^,]+)/);
+        var s = m ? (m[1] + '/' + m[2]) : raw;
+        return s.replace(/\s+/g, ' ').trim().slice(0, 64);
+      } catch (e) { return 'err-gpu'; }
+    }
+
+    (function () {
+      var params = new URLSearchParams(location.search);
+      if (!params.get('seed')) {
+        var fp = [
+          navigator.userAgent || '',
+          (screen.width || 0) + 'x' + (screen.height || 0) + '@' + (window.devicePixelRatio || 1),
+          (Intl.DateTimeFormat().resolvedOptions().timeZone) || '',
+          navigator.language || '',
+          gpuShortName()
+        ].join('|');
+        var h = cyrb53(fp, 0);
+        params.set('seed', ('00000000' + h.toString(16)).slice(-8));
+      }
+      if (!params.get('gpu')) params.set('gpu', gpuShortName());
+      var qs = '?' + params.toString();
+      if (qs !== location.search) {
+        history.replaceState(null, '', qs + location.hash);
+      }
+    })();
+
     var statusEl = document.getElementById('status');
     var Module = {
+      // Sokol's sargs_setup() reads location.search on the emscripten target.
       canvas: (function () { return document.getElementById('canvas'); })(),
       print: function (text) { console.log(text); },
       printErr: function (text) { console.error(text); },
@@ -55,7 +106,6 @@
         }
       },
       onRuntimeInitialized: function () {
-        // sokol_app starts its own RAF loop; hide the loading overlay.
         Module.setStatus('');
       },
     };
