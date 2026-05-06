@@ -17,6 +17,7 @@ emcc "$ROOT_DIR/src/main.c" \
   -s ALLOW_MEMORY_GROWTH=1 \
   -s WASM=1 \
   -s ENVIRONMENT=web \
+  -s EXPORTED_FUNCTIONS='["_main","_next_fractal"]' \
   --shell-file "$ROOT_DIR/src/shell.html" \
   -o "$OUT_DIR/index.html"
 

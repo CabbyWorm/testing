@@ -25,6 +25,13 @@
 #include "sokol_args.h"
 #include "sokol_debugtext.h"
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten/emscripten.h>
+#define WASM_EXPORT EMSCRIPTEN_KEEPALIVE
+#else
+#define WASM_EXPORT
+#endif
+
 #define PI 3.14159265358979323846f
 
 typedef struct {
@@ -271,6 +278,17 @@ static void seed_to_initial_state(uint32_t seed) {
     state.distance = distance_for_kind(state.params.kind);
 }
 
+// Called from JS on a device-motion shake. Bumps the seed forward and
+// re-derives kind/palette/param/framing so the user gets a fresh fractal
+// every time they shake their phone.
+WASM_EXPORT void next_fractal(void) {
+    state.seed += 0x9E3779B1u;  // golden-ratio constant; well-distributed step
+    seed_to_initial_state(state.seed);
+    state.yaw0      = state.yaw;
+    state.pitch0    = state.pitch;
+    state.distance0 = state.distance;
+}
+
 static void apply_url_overrides(void) {
     if (sargs_exists("type")) {
         const char *t = sargs_value("type");
@@ -315,7 +333,7 @@ static void init(void) {
     const char *g = sargs_value_def("gpu", "");
     strncpy(state.gpu, g, sizeof(state.gpu) - 1);
     state.gpu[sizeof(state.gpu) - 1] = 0;
-    state.show_overlay = true;
+    state.show_overlay = false;
 
     float verts[] = { -1.0f, -3.0f, -1.0f, 1.0f, 3.0f, 1.0f };
     state.bind.vertex_buffers[0] = sg_make_buffer(&(sg_buffer_desc){

@@ -113,6 +113,46 @@
       Module.setStatus('error — see console');
       console.error(msg);
     };
+
+    // Shake the device -> jump to a new fractal. Calls into the wasm-exported
+    // next_fractal() once the runtime is up. iOS Safari requires a user gesture
+    // before DeviceMotionEvent.requestPermission() can be called, so we attach
+    // permission-request to the first tap.
+    (function () {
+      var lastA = null;
+      var lastShakeAt = 0;
+      function onMotion(e) {
+        var a = e.accelerationIncludingGravity || e.acceleration;
+        if (!a || a.x == null) return;
+        if (lastA) {
+          var dx = a.x - lastA.x, dy = a.y - lastA.y, dz = a.z - lastA.z;
+          var delta = Math.sqrt(dx*dx + dy*dy + dz*dz);
+          var now = Date.now();
+          if (delta > 28 && now - lastShakeAt > 700) {
+            lastShakeAt = now;
+            try { if (Module && Module._next_fractal) Module._next_fractal(); }
+            catch (err) { console.error(err); }
+          }
+        }
+        lastA = { x: a.x, y: a.y, z: a.z };
+      }
+      function attach() {
+        window.addEventListener('devicemotion', onMotion, { passive: true });
+      }
+      function enable() {
+        if (typeof DeviceMotionEvent === 'undefined') return;
+        if (typeof DeviceMotionEvent.requestPermission === 'function') {
+          DeviceMotionEvent.requestPermission()
+            .then(function (r) { if (r === 'granted') attach(); })
+            .catch(function () {});
+        } else {
+          attach();
+        }
+      }
+      // Safe to attach without permission on Android/desktop; iOS needs a tap.
+      enable();
+      window.addEventListener('touchstart', enable, { once: true, passive: true });
+    })();
   </script>
   {{{ SCRIPT }}}
 </body>
