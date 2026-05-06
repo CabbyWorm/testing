@@ -39,8 +39,10 @@ typedef struct {
     float cam_target[3];
     float aspect;
     float param;
+    float fov_scale;
     int   kind;
     int   palette_id;
+    int   iter_boost;
 } fs_params_t;
 
 enum {
@@ -79,6 +81,7 @@ static struct {
     float pinch_last_dist;
 
     bool show_overlay;
+    bool auto_zoom;
     uint32_t seed;
     char gpu[80];
 } state;
@@ -99,8 +102,10 @@ static const char *fs_src =
     "uniform vec3 cam_target;\n"
     "uniform float aspect;\n"
     "uniform float param;\n"
+    "uniform float fov_scale;\n"
     "uniform int kind;\n"
     "uniform int palette_id;\n"
+    "uniform int iter_boost;\n"
     "in vec2 v_uv;\n"
     "out vec4 frag_color;\n"
     "\n"
@@ -119,7 +124,8 @@ static const char *fs_src =
     "  vec3 z = p;\n"
     "  float dr = 1.0;\n"
     "  float r = 0.0;\n"
-    "  for (int i = 0; i < 10; i++) {\n"
+    "  for (int i = 0; i < 24; i++) {\n"
+    "    if (i >= 10 + iter_boost) break;\n"
     "    r = length(z);\n"
     "    if (r > 2.0) break;\n"
     "    float theta = acos(clamp(z.z / r, -1.0, 1.0));\n"
@@ -138,7 +144,8 @@ static const char *fs_src =
     "  vec3 offset = p;\n"
     "  vec3 z = p;\n"
     "  float dr = 1.0;\n"
-    "  for (int i = 0; i < 12; i++) {\n"
+    "  for (int i = 0; i < 24; i++) {\n"
+    "    if (i >= 12 + iter_boost) break;\n"
     "    z = clamp(z, -1.0, 1.0) * 2.0 - z;\n"
     "    float r2 = dot(z, z);\n"
     "    if (r2 < 0.25) { z *= 4.0; dr *= 4.0; }\n"
@@ -150,13 +157,16 @@ static const char *fs_src =
     "}\n"
     "\n"
     "float DE_sierpinski(vec3 p, float scale) {\n"
-    "  for (int i = 0; i < 12; i++) {\n"
+    "  int n = 0;\n"
+    "  for (int i = 0; i < 24; i++) {\n"
+    "    if (i >= 12 + iter_boost) break;\n"
     "    if (p.x + p.y < 0.0) p.xy = -p.yx;\n"
     "    if (p.x + p.z < 0.0) p.xz = -p.zx;\n"
     "    if (p.y + p.z < 0.0) p.yz = -p.zy;\n"
     "    p = p * scale - vec3(scale - 1.0);\n"
+    "    n = i + 1;\n"
     "  }\n"
-    "  return (length(p) - 2.0) * pow(scale, -12.0);\n"
+    "  return (length(p) - 2.0) * pow(scale, -float(n));\n"
     "}\n"
     "\n"
     "float DE_menger(vec3 p, float fold) {\n"
@@ -164,7 +174,8 @@ static const char *fs_src =
     "  vec3 q = abs(p / fold) - b;\n"
     "  float d = (length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0)) * fold;\n"
     "  float s = 1.0;\n"
-    "  for (int i = 0; i < 5; i++) {\n"
+    "  for (int i = 0; i < 14; i++) {\n"
+    "    if (i >= 5 + iter_boost) break;\n"
     "    vec3 a = mod(p * s, 2.0 * fold) - fold;\n"
     "    s *= 3.0;\n"
     "    vec3 r = abs(1.0 - 3.0 * abs(a) / fold);\n"
@@ -182,7 +193,8 @@ static const char *fs_src =
     "}\n"
     "\n"
     "vec3 estimate_normal(vec3 p) {\n"
-    "  const vec2 e = vec2(0.0006, 0.0);\n"
+    "  float h = 0.0006 / fov_scale;\n"
+    "  vec2 e = vec2(h, 0.0);\n"
     "  return normalize(vec3(\n"
     "    DE(p + e.xyy) - DE(p - e.xyy),\n"
     "    DE(p + e.yxy) - DE(p - e.yxy),\n"
@@ -190,14 +202,14 @@ static const char *fs_src =
     "}\n"
     "\n"
     "void main() {\n"
-    "  vec2 uv = vec2(v_uv.x * 2.0 * aspect, v_uv.y * 2.0);\n"
+    "  vec2 uv = vec2(v_uv.x * 2.0 * aspect, v_uv.y * 2.0) / fov_scale;\n"
     "\n"
     "  vec3 fwd = normalize(cam_target - cam_pos);\n"
     "  vec3 right = normalize(cross(fwd, vec3(0.0, 1.0, 0.0)));\n"
     "  vec3 up = cross(right, fwd);\n"
     "  vec3 dir = normalize(fwd + right * uv.x + up * uv.y);\n"
     "\n"
-    "  const int MAX_STEPS = 96;\n"
+    "  const int MAX_STEPS = 160;\n"
     "  float t = 0.0;\n"
     "  bool hit = false;\n"
     "  int steps = 0;\n"
@@ -205,7 +217,7 @@ static const char *fs_src =
     "    steps = i;\n"
     "    vec3 p = cam_pos + dir * t;\n"
     "    float d = DE(p);\n"
-    "    if (d < 0.0008 * max(t, 1.0)) { hit = true; break; }\n"
+    "    if (d < 0.0008 * (t + 0.0005) / fov_scale) { hit = true; break; }\n"
     "    if (t > 30.0) break;\n"
     "    t += d * 0.95;\n"
     "  }\n"
@@ -306,10 +318,14 @@ static void apply_url_overrides(void) {
 }
 
 static void update_cam_pos(void) {
+    // Camera orbit radius is fixed at the seed-derived initial distance.
+    // The state.distance variable is treated as inverse-of-zoom and feeds
+    // fov_scale instead of moving the camera through the surface.
     float cp = cosf(state.pitch);
-    state.params.cam_pos[0] = state.distance * cp * sinf(state.yaw);
-    state.params.cam_pos[1] = state.distance * sinf(state.pitch);
-    state.params.cam_pos[2] = state.distance * cp * cosf(state.yaw);
+    float r = state.distance0;
+    state.params.cam_pos[0] = r * cp * sinf(state.yaw);
+    state.params.cam_pos[1] = r * sinf(state.pitch);
+    state.params.cam_pos[2] = r * cp * cosf(state.yaw);
     state.params.cam_target[0] = 0.0f;
     state.params.cam_target[1] = 0.0f;
     state.params.cam_target[2] = 0.0f;
@@ -353,8 +369,10 @@ static void init(void) {
                 [1] = { .glsl_name = "cam_target", .type = SG_UNIFORMTYPE_FLOAT3 },
                 [2] = { .glsl_name = "aspect",     .type = SG_UNIFORMTYPE_FLOAT  },
                 [3] = { .glsl_name = "param",      .type = SG_UNIFORMTYPE_FLOAT  },
-                [4] = { .glsl_name = "kind",       .type = SG_UNIFORMTYPE_INT    },
-                [5] = { .glsl_name = "palette_id", .type = SG_UNIFORMTYPE_INT    },
+                [4] = { .glsl_name = "fov_scale",  .type = SG_UNIFORMTYPE_FLOAT  },
+                [5] = { .glsl_name = "kind",       .type = SG_UNIFORMTYPE_INT    },
+                [6] = { .glsl_name = "palette_id", .type = SG_UNIFORMTYPE_INT    },
+                [7] = { .glsl_name = "iter_boost", .type = SG_UNIFORMTYPE_INT    },
             },
         },
         .label = "fractal-shader",
@@ -382,8 +400,8 @@ static void orbit(float dx_px, float dy_px) {
 
 static void dolly(float factor) {
     state.distance *= factor;
-    if (state.distance < 1.2f)  state.distance = 1.2f;
-    if (state.distance > 10.0f) state.distance = 10.0f;
+    if (state.distance < 0.001f) state.distance = 0.001f;
+    if (state.distance > 10.0f)  state.distance = 10.0f;
 }
 
 static void event(const sapp_event *e) {
@@ -462,8 +480,11 @@ static void event(const sapp_event *e) {
                 state.yaw      = state.yaw0;
                 state.pitch    = state.pitch0;
                 state.distance = state.distance0;
+                state.auto_zoom = false;
             } else if (e->key_code == SAPP_KEYCODE_H) {
                 state.show_overlay = !state.show_overlay;
+            } else if (e->key_code == SAPP_KEYCODE_Z) {
+                state.auto_zoom = !state.auto_zoom;
             }
             break;
         default:
@@ -472,7 +493,22 @@ static void event(const sapp_event *e) {
 }
 
 static void frame(void) {
+    if (state.auto_zoom) {
+        float dt = (float)sapp_frame_duration();
+        state.distance *= expf(-dt * 0.25f);
+        state.yaw += dt * 0.18f;
+        if (state.distance < 0.001f) state.distance = state.distance0;
+    }
+
     state.params.aspect = sapp_widthf() / sapp_heightf();
+    state.params.fov_scale = state.distance0 / fmaxf(state.distance, 1e-6f);
+
+    float zoom_decades = log2f(state.params.fov_scale);
+    int boost = (int)(zoom_decades * 1.5f);
+    if (boost < 0)  boost = 0;
+    if (boost > 12) boost = 12;
+    state.params.iter_boost = boost;
+
     update_cam_pos();
 
     sg_begin_pass(&(sg_pass){ .action = state.pass_action, .swapchain = sglue_swapchain() });
@@ -494,11 +530,14 @@ static void frame(void) {
         sdtx_printf("type     %s\n", KIND_NAMES[state.params.kind]);
         sdtx_printf("palette  %s\n", PALETTE_NAMES[state.params.palette_id]);
         sdtx_printf("%-8s %.3f\n", PARAM_LABELS[state.params.kind], (double)state.params.param);
-        sdtx_printf("camera   yaw %+0.3f  pitch %+0.3f  d %.2f\n",
-                    (double)state.yaw, (double)state.pitch, (double)state.distance);
+        sdtx_printf("camera   yaw %+0.3f  pitch %+0.3f  zoom %.1fx%s\n",
+                    (double)state.yaw, (double)state.pitch,
+                    (double)(state.distance0 / state.distance),
+                    state.auto_zoom ? "  [auto]" : "");
+        sdtx_printf("iters    +%d boost\n", state.params.iter_boost);
         sdtx_printf("gpu      %s\n", state.gpu[0] ? state.gpu : "?");
         sdtx_color3b(0x50, 0x58, 0x60);
-        sdtx_printf("\ndrag orbit  scroll/pinch dolly  R reset  H hide");
+        sdtx_printf("\ndrag orbit  scroll/pinch dolly  Z auto-zoom  R reset  H hide");
         sdtx_draw();
     }
 
