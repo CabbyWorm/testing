@@ -31,10 +31,26 @@ jobs:
           version: 3.1.64
           actions-cache-folder: emsdk-cache
 
+      - name: Cache Emscripten system libraries
+        uses: actions/cache@v4
+        with:
+          path: ~/.emscripten_cache
+          key: emscripten-cache-${{ runner.os }}-3.1.64-${{ hashFiles('build.sh') }}
+          restore-keys: |
+            emscripten-cache-${{ runner.os }}-3.1.64-
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ${{ runner.os }}-emcc-3.1.64
+          variant: ccache
+
       - name: Verify emcc
         run: emcc --version
 
       - name: Build
+        env:
+          EM_COMPILER_WRAPPER: ccache
         run: ./build.sh
 
       - name: Upload Pages artifact
