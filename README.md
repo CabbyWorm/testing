@@ -1,15 +1,23 @@
-# your sokol fractal — WebAssembly + GitHub Pages
+# your sokol viz — WebAssembly + GitHub Pages
 
-A per-client fractal generator written in C with [Sokol](https://github.com/floooh/sokol),
+A multi-visualization renderer written in C with [Sokol](https://github.com/floooh/sokol),
 compiled to WebAssembly with Emscripten, and deployed to GitHub Pages.
 
-The browser fingerprint (user agent, screen size, GPU renderer, timezone,
-language) is hashed in JavaScript before the wasm starts, then written into
-the page URL as `?seed=...&gpu=...`. The C code reads that via `sokol_args`,
-and the seed deterministically picks one of four escape-time fractals
-(Mandelbrot, Julia, Burning Ship, Tricorn), a palette, and a starting view —
-so the same browser always lands on the same fractal, and copying the URL
-shares it with someone else.
+Two visualizations ship today:
+
+- **fractals** — raymarched 3D distance-estimated fractal (Mandelbulb,
+  Mandelbox, Sierpinski tetrahedron, or Menger sponge). The browser
+  fingerprint (user agent, screen size, GPU renderer, timezone, language)
+  is hashed in JavaScript and written into the page URL as
+  `?seed=...&gpu=...`; the seed deterministically picks the fractal kind,
+  palette, and starting view, so the same browser always lands on the
+  same fractal.
+- **volcanic eruption** — raymarched 3D night-time stratovolcano with
+  glowing lava cracks, a volumetric ash plume, and embers.
+
+Each visualization is its own translation unit (`src/viz_fractal.c`,
+`src/viz_volcano.c`) plugged into a tiny vtable in `src/viz.h`; adding a
+new one is a `.c`/`.h` pair plus a single line in `src/viz_registry.c`.
 
 The site runs entirely in the browser via WebGL2.
 
@@ -19,27 +27,36 @@ The site runs entirely in the browser via WebGL2.
 https://cabbyworm.github.io/testing/
 ```
 
-URL parameters that override the fingerprint-derived defaults:
+URL parameters:
 
-| param   | meaning                                                      |
-| ------- | ------------------------------------------------------------ |
-| seed    | 8 hex digits, e.g. `?seed=deadbeef`                          |
-| type    | `mandelbrot` / `julia` / `burningship` / `tricorn`           |
-| palette | integer 0–5                                                  |
-| zoom    | float; smaller = deeper zoom                                 |
-| cx, cy  | floats, fractal-space center                                 |
-| jx, jy  | floats, Julia c-constant (only for `type=julia`)             |
+| param   | meaning                                                              |
+| ------- | -------------------------------------------------------------------- |
+| viz     | `fractal` (default) or `volcano`                                     |
+| seed    | 8 hex digits, e.g. `?seed=deadbeef` (fractal viz)                    |
+| type    | `mandelbulb` / `mandelbox` / `sierpinski` / `menger` (fractal viz)   |
+| palette | integer 0–5 (fractal viz)                                            |
+| power   | float, `param` for the active fractal kind                           |
+| scale   | alias of `power` for mandelbox/sierpinski                            |
+| dist    | float, initial camera dolly distance                                 |
+| yaw     | float, initial camera yaw                                            |
+| pitch   | float, initial camera pitch                                          |
 
-In-page controls: **drag** pans, **scroll wheel / pinch** zooms about the
-cursor or pinch midpoint, **R** resets to the seed-derived view, **H**
-toggles the overlay.
+In-page controls: **drag** orbits, **scroll wheel / pinch** zooms (telephoto
+FOV), **R** resets to the home framing, **H** toggles the overlay,
+**Z** toggles auto-zoom (fractal viz only), and **M** opens the
+visualization menu (↑/↓ select, **Enter** apply, **Esc**/**M** close).
 
 ## Layout
 
 ```
-src/main.c                 # fractal renderer (sokol_app/gfx/glue/log/args/debugtext)
+src/main.c                 # sokol_app entry, frame loop, input, menu, viz dispatch
+src/common.h               # shared types (camera_t), sokol-header includes (no IMPL)
+src/viz.h                  # viz_iface vtable + extern registry
+src/viz_registry.c         # one-line-per-viz registry
+src/viz_fractal.{h,c}      # raymarched 3D fractal viz
+src/viz_volcano.{h,c}      # raymarched 3D volcanic eruption viz
 src/shell.html             # custom Emscripten shell + fingerprint JS
-build.sh                   # emcc invocation, also used by CI
+build.sh                   # emcc invocation (multi-TU), also used by CI
 dev.sh                     # local dev wrapper: build + serve on :8765
 third_party/sokol          # vendored as a git submodule (pinned)
 .github/workflows/pages.yml  # CI: emsdk -> emcc -> deploy-pages
