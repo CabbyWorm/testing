@@ -1,29 +1,17 @@
-// Per-client 3D fractal generator. The browser fingerprint is hashed in
-// shell.html and written to the page URL as ?seed=<8 hex>&gpu=<short>.
-// sokol_args (third_party/sokol/sokol_args.h:753) parses location.search on
-// the emscripten target, so we read the seed straight out via
-// sargs_value_def. The seed picks fractal kind, palette, kind parameter,
-// and starting framing; the same browser always lands on the same fractal.
+// Per-client multi-visualization renderer. The browser fingerprint is
+// hashed in shell.html and written to the page URL as
+// ?seed=<8 hex>&gpu=<short>&viz=<name>. sokol_args parses location.search
+// on the emscripten target, so we read those straight out via sargs_value*.
 //
-// Rendering is a fullscreen-triangle GLES3 fragment shader that raymarches
-// a distance-estimated 3D fractal — Mandelbulb, Mandelbox, Sierpinski
-// tetrahedron, or Menger sponge. sokol_debugtext draws the on-screen
-// overlay using its built-in CGA font (no external font files).
-
-#include <math.h>
-#include <stddef.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+// Two visualizations ship today: a raymarched 3D fractal (the original)
+// and a raymarched 3D volcanic eruption. They are independent translation
+// units (src/viz_fractal.c, src/viz_volcano.c) plugged in via the
+// viz_iface vtable in viz.h. Adding more is one .c/.h pair plus one line
+// in viz_registry.c.
 
 #define SOKOL_IMPL
-#include "sokol_app.h"
-#include "sokol_gfx.h"
-#include "sokol_glue.h"
-#include "sokol_log.h"
-#include "sokol_args.h"
-#include "sokol_debugtext.h"
+#include "common.h"
+#include "viz.h"
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten/emscripten.h>
@@ -32,215 +20,46 @@
 #define WASM_EXPORT
 #endif
 
-#define PI 3.14159265358979323846f
-
-typedef struct {
-    float cam_pos[3];
-    float cam_target[3];
-    float aspect;
-    float param;
-    float fov_scale;
-    int   kind;
-    int   palette_id;
-    int   iter_boost;
-} fs_params_t;
-
-enum {
-    KIND_MANDELBULB = 0,
-    KIND_MANDELBOX,
-    KIND_SIERPINSKI,
-    KIND_MENGER,
-    KIND_COUNT,
-};
-
-static const char *KIND_NAMES[KIND_COUNT] = {
-    "mandelbulb", "mandelbox", "sierpinski", "menger sponge",
-};
-
-static const char *PARAM_LABELS[KIND_COUNT] = {
-    "power", "scale", "scale", "fold",
-};
-
-#define PALETTE_COUNT 6
-static const char *PALETTE_NAMES[PALETTE_COUNT] = {
-    "ember", "lagoon", "twilight", "sunrise", "moss", "neon",
-};
-
 static struct {
-    sg_pipeline pip;
-    sg_bindings bind;
-    sg_pass_action pass_action;
-    fs_params_t params;
+    int viz_index;
+    camera_t cam;
 
-    float yaw, pitch, distance;
-    float yaw0, pitch0, distance0;
+    bool show_overlay;
+    bool show_menu;
+    int  menu_sel;
+    bool auto_zoom;
+
+    double time_accum;
 
     bool drag_active;
     float drag_last_x, drag_last_y;
     bool pinch_active;
     float pinch_last_dist;
 
-    bool show_overlay;
-    bool auto_zoom;
     uint32_t seed;
     char gpu[80];
+
+    sg_pass_action pass_action;
+    sg_buffer fullscreen_tri;
 } state;
 
-static const char *vs_src =
-    "#version 300 es\n"
-    "layout(location=0) in vec2 pos;\n"
-    "out vec2 v_uv;\n"
-    "void main() {\n"
-    "  gl_Position = vec4(pos, 0.0, 1.0);\n"
-    "  v_uv = pos * 0.5;\n"
-    "}\n";
+uint32_t main_get_seed(void) { return state.seed; }
+sg_buffer fullscreen_tri_buffer(void) { return state.fullscreen_tri; }
 
-static const char *fs_src =
-    "#version 300 es\n"
-    "precision highp float;\n"
-    "uniform vec3 cam_pos;\n"
-    "uniform vec3 cam_target;\n"
-    "uniform float aspect;\n"
-    "uniform float param;\n"
-    "uniform float fov_scale;\n"
-    "uniform int kind;\n"
-    "uniform int palette_id;\n"
-    "uniform int iter_boost;\n"
-    "in vec2 v_uv;\n"
-    "out vec4 frag_color;\n"
-    "\n"
-    "vec3 palette_lookup(float t, int id) {\n"
-    "  vec3 a, b, c, d;\n"
-    "  if (id == 0)      { a = vec3(0.55,0.30,0.15); b = vec3(0.45,0.45,0.35); c = vec3(1.0,1.0,1.0); d = vec3(0.00,0.10,0.20); }\n"
-    "  else if (id == 1) { a = vec3(0.20,0.45,0.55); b = vec3(0.30,0.40,0.50); c = vec3(1.0,1.0,1.0); d = vec3(0.50,0.20,0.25); }\n"
-    "  else if (id == 2) { a = vec3(0.50,0.50,0.50); b = vec3(0.50,0.50,0.50); c = vec3(2.0,1.0,0.0); d = vec3(0.50,0.20,0.25); }\n"
-    "  else if (id == 3) { a = vec3(0.80,0.50,0.40); b = vec3(0.20,0.40,0.20); c = vec3(2.0,1.0,1.0); d = vec3(0.00,0.25,0.25); }\n"
-    "  else if (id == 4) { a = vec3(0.30,0.50,0.30); b = vec3(0.30,0.50,0.40); c = vec3(1.0,1.0,1.0); d = vec3(0.00,0.33,0.67); }\n"
-    "  else              { a = vec3(0.50,0.00,0.50); b = vec3(0.50,0.50,0.50); c = vec3(1.0,1.0,0.5); d = vec3(0.80,0.90,0.30); }\n"
-    "  return a + b * cos(6.28318530718 * (c * t + d));\n"
-    "}\n"
-    "\n"
-    "float DE_mandelbulb(vec3 p, float power) {\n"
-    "  vec3 z = p;\n"
-    "  float dr = 1.0;\n"
-    "  float r = 0.0;\n"
-    "  for (int i = 0; i < 24; i++) {\n"
-    "    if (i >= 10 + iter_boost) break;\n"
-    "    r = length(z);\n"
-    "    if (r > 2.0) break;\n"
-    "    float theta = acos(clamp(z.z / r, -1.0, 1.0));\n"
-    "    float phi = atan(z.y, z.x);\n"
-    "    dr = pow(r, power - 1.0) * power * dr + 1.0;\n"
-    "    float zr = pow(r, power);\n"
-    "    theta *= power;\n"
-    "    phi *= power;\n"
-    "    z = zr * vec3(sin(theta) * cos(phi), sin(theta) * sin(phi), cos(theta));\n"
-    "    z += p;\n"
-    "  }\n"
-    "  return 0.5 * log(max(r, 1e-6)) * r / dr;\n"
-    "}\n"
-    "\n"
-    "float DE_mandelbox(vec3 p, float scale) {\n"
-    "  vec3 offset = p;\n"
-    "  vec3 z = p;\n"
-    "  float dr = 1.0;\n"
-    "  for (int i = 0; i < 24; i++) {\n"
-    "    if (i >= 12 + iter_boost) break;\n"
-    "    z = clamp(z, -1.0, 1.0) * 2.0 - z;\n"
-    "    float r2 = dot(z, z);\n"
-    "    if (r2 < 0.25) { z *= 4.0; dr *= 4.0; }\n"
-    "    else if (r2 < 1.0) { float k = 1.0 / r2; z *= k; dr *= k; }\n"
-    "    z = scale * z + offset;\n"
-    "    dr = abs(scale) * dr + 1.0;\n"
-    "  }\n"
-    "  return length(z) / abs(dr);\n"
-    "}\n"
-    "\n"
-    "float DE_sierpinski(vec3 p, float scale) {\n"
-    "  int n = 0;\n"
-    "  for (int i = 0; i < 24; i++) {\n"
-    "    if (i >= 12 + iter_boost) break;\n"
-    "    if (p.x + p.y < 0.0) p.xy = -p.yx;\n"
-    "    if (p.x + p.z < 0.0) p.xz = -p.zx;\n"
-    "    if (p.y + p.z < 0.0) p.yz = -p.zy;\n"
-    "    p = p * scale - vec3(scale - 1.0);\n"
-    "    n = i + 1;\n"
-    "  }\n"
-    "  return (length(p) - 2.0) * pow(scale, -float(n));\n"
-    "}\n"
-    "\n"
-    "float DE_menger(vec3 p, float fold) {\n"
-    "  vec3 b = vec3(1.0);\n"
-    "  vec3 q = abs(p / fold) - b;\n"
-    "  float d = (length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0)) * fold;\n"
-    "  float s = 1.0;\n"
-    "  for (int i = 0; i < 14; i++) {\n"
-    "    if (i >= 5 + iter_boost) break;\n"
-    "    vec3 a = mod(p * s, 2.0 * fold) - fold;\n"
-    "    s *= 3.0;\n"
-    "    vec3 r = abs(1.0 - 3.0 * abs(a) / fold);\n"
-    "    float c = (min(max(r.x, r.y), min(max(r.y, r.z), max(r.z, r.x))) - 1.0) * fold / s;\n"
-    "    d = max(d, c);\n"
-    "  }\n"
-    "  return d;\n"
-    "}\n"
-    "\n"
-    "float DE(vec3 p) {\n"
-    "  if (kind == 0) return DE_mandelbulb(p, param);\n"
-    "  if (kind == 1) return DE_mandelbox(p, param);\n"
-    "  if (kind == 2) return DE_sierpinski(p, param);\n"
-    "  return DE_menger(p, param);\n"
-    "}\n"
-    "\n"
-    "vec3 estimate_normal(vec3 p) {\n"
-    "  float h = 0.0006 / fov_scale;\n"
-    "  vec2 e = vec2(h, 0.0);\n"
-    "  return normalize(vec3(\n"
-    "    DE(p + e.xyy) - DE(p - e.xyy),\n"
-    "    DE(p + e.yxy) - DE(p - e.yxy),\n"
-    "    DE(p + e.yyx) - DE(p - e.yyx)));\n"
-    "}\n"
-    "\n"
-    "void main() {\n"
-    "  vec2 uv = vec2(v_uv.x * 2.0 * aspect, v_uv.y * 2.0) / fov_scale;\n"
-    "\n"
-    "  vec3 fwd = normalize(cam_target - cam_pos);\n"
-    "  vec3 right = normalize(cross(fwd, vec3(0.0, 1.0, 0.0)));\n"
-    "  vec3 up = cross(right, fwd);\n"
-    "  vec3 dir = normalize(fwd + right * uv.x + up * uv.y);\n"
-    "\n"
-    "  const int MAX_STEPS = 160;\n"
-    "  float t = 0.0;\n"
-    "  bool hit = false;\n"
-    "  int steps = 0;\n"
-    "  for (int i = 0; i < MAX_STEPS; i++) {\n"
-    "    steps = i;\n"
-    "    vec3 p = cam_pos + dir * t;\n"
-    "    float d = DE(p);\n"
-    "    if (d < 0.0008 * (t + 0.0005) / fov_scale) { hit = true; break; }\n"
-    "    if (t > 30.0) break;\n"
-    "    t += d * 0.95;\n"
-    "  }\n"
-    "\n"
-    "  if (hit) {\n"
-    "    vec3 p = cam_pos + dir * t;\n"
-    "    vec3 n = estimate_normal(p);\n"
-    "    vec3 light_dir = normalize(vec3(0.5, 0.7, 0.3));\n"
-    "    float ndl = max(0.0, dot(n, light_dir));\n"
-    "    float ao = 1.0 - float(steps) / float(MAX_STEPS);\n"
-    "    vec3 albedo = palette_lookup(ao, palette_id);\n"
-    "    vec3 col = albedo * (0.18 + 0.82 * ndl) * (0.45 + 0.55 * ao);\n"
-    "    float rim = pow(1.0 - max(0.0, dot(n, -dir)), 2.0);\n"
-    "    col += rim * 0.18 * vec3(0.65, 0.75, 0.95);\n"
-    "    float fog = 1.0 - exp(-t * 0.04);\n"
-    "    col = mix(col, vec3(0.04, 0.05, 0.08), fog * 0.5);\n"
-    "    frag_color = vec4(col, 1.0);\n"
-    "  } else {\n"
-    "    float vy = clamp(0.5 + dir.y * 0.5, 0.0, 1.0);\n"
-    "    vec3 sky = mix(vec3(0.02, 0.02, 0.04), vec3(0.05, 0.06, 0.10), vy);\n"
-    "    frag_color = vec4(sky, 1.0);\n"
-    "  }\n"
-    "}\n";
+void compute_camera_basis(const camera_t *cam,
+                          float out_pos[3],
+                          float out_target[3],
+                          float *out_fov_scale) {
+    float cp = cosf(cam->pitch);
+    float r = cam->distance0;
+    out_pos[0] = r * cp * sinf(cam->yaw);
+    out_pos[1] = r * sinf(cam->pitch);
+    out_pos[2] = r * cp * cosf(cam->yaw);
+    out_target[0] = 0.0f;
+    out_target[1] = 0.0f;
+    out_target[2] = 0.0f;
+    *out_fov_scale = cam->distance0 / fmaxf(cam->distance, 1e-6f);
+}
 
 static uint32_t parse_seed_hex(const char *s) {
     if (!s) return 0;
@@ -248,87 +67,27 @@ static uint32_t parse_seed_hex(const char *s) {
     return (uint32_t)strtoul(s, NULL, 16);
 }
 
-static float param_for_kind(int kind, uint32_t bits) {
-    switch (kind) {
-        case KIND_MANDELBULB: {
-            int t = (int)(bits % 12);
-            if (t < 6)        return 8.0f;
-            else if (t < 8)   return 7.0f;
-            else if (t < 10)  return 9.0f;
-            else if (t == 10) return 5.0f;
-            else              return 4.0f;
-        }
-        case KIND_MANDELBOX:
-            return -2.0f + ((float)(bits & 0xff) / 255.0f) * 0.5f;
-        case KIND_SIERPINSKI:
-            return 1.7f + ((float)(bits & 0xff) / 255.0f) * 0.5f;
-        case KIND_MENGER:
-        default:
-            return 1.0f;
+static int viz_index_for_token(const char *tok) {
+    for (int i = 0; i < VIZ_COUNT; i++) {
+        if (strcmp(tok, VIZ_REGISTRY[i]->url_token) == 0) return i;
+        if (strcmp(tok, VIZ_REGISTRY[i]->name)      == 0) return i;
     }
+    return -1;
 }
 
-static float distance_for_kind(int kind) {
-    switch (kind) {
-        case KIND_MANDELBULB: return 2.6f;
-        case KIND_MANDELBOX:  return 4.5f;
-        case KIND_SIERPINSKI: return 3.2f;
-        case KIND_MENGER:     return 3.8f;
-        default:              return 3.0f;
-    }
-}
-
-static void seed_to_initial_state(uint32_t seed) {
-    state.params.kind       = (int)(seed % KIND_COUNT);
-    state.params.palette_id = (int)((seed >> 4) % PALETTE_COUNT);
-    state.params.param      = param_for_kind(state.params.kind, seed >> 8);
-
-    float jx = (float)((seed >> 16) & 0xff) / 255.0f - 0.5f;
-    float jy = (float)((seed >> 24) & 0xff) / 255.0f - 0.5f;
-    state.yaw      = jx * 2.0f * PI;
-    state.pitch    = jy * 0.6f;
-    state.distance = distance_for_kind(state.params.kind);
+static void switch_viz(int idx) {
+    if (idx < 0 || idx >= VIZ_COUNT) return;
+    state.viz_index = idx;
+    VIZ_REGISTRY[idx]->apply_defaults(&state.cam);
+    state.auto_zoom = false;
 }
 
 // Called from JS on a device-motion shake. Bumps the seed forward and
-// re-derives kind/palette/param/framing so the user gets a fresh fractal
-// every time they shake their phone.
+// re-applies the active viz's defaults so the shaking visibly resets the
+// camera (and, for the fractal viz, picks a new fractal).
 WASM_EXPORT void next_fractal(void) {
     state.seed += 0x9E3779B1u;  // golden-ratio constant; well-distributed step
-    seed_to_initial_state(state.seed);
-    state.yaw0      = state.yaw;
-    state.pitch0    = state.pitch;
-    state.distance0 = state.distance;
-}
-
-static void apply_url_overrides(void) {
-    if (sargs_exists("type")) {
-        const char *t = sargs_value("type");
-        if      (strcmp(t, "mandelbulb") == 0) state.params.kind = KIND_MANDELBULB;
-        else if (strcmp(t, "mandelbox")  == 0) state.params.kind = KIND_MANDELBOX;
-        else if (strcmp(t, "sierpinski") == 0) state.params.kind = KIND_SIERPINSKI;
-        else if (strcmp(t, "menger")     == 0) state.params.kind = KIND_MENGER;
-    }
-    if (sargs_exists("palette")) state.params.palette_id = atoi(sargs_value("palette")) % PALETTE_COUNT;
-    if (sargs_exists("power"))   state.params.param = (float)atof(sargs_value("power"));
-    if (sargs_exists("scale"))   state.params.param = (float)atof(sargs_value("scale"));
-    if (sargs_exists("dist"))    state.distance = (float)atof(sargs_value("dist"));
-    if (sargs_exists("yaw"))     state.yaw = (float)atof(sargs_value("yaw"));
-    if (sargs_exists("pitch"))   state.pitch = (float)atof(sargs_value("pitch"));
-}
-
-static void update_cam_pos(void) {
-    // Camera orbit radius is fixed at the seed-derived initial distance.
-    // The state.distance variable is treated as inverse-of-zoom and feeds
-    // fov_scale instead of moving the camera through the surface.
-    float cp = cosf(state.pitch);
-    float r = state.distance0;
-    state.params.cam_pos[0] = r * cp * sinf(state.yaw);
-    state.params.cam_pos[1] = r * sinf(state.pitch);
-    state.params.cam_pos[2] = r * cp * cosf(state.yaw);
-    state.params.cam_target[0] = 0.0f;
-    state.params.cam_target[1] = 0.0f;
-    state.params.cam_target[2] = 0.0f;
+    VIZ_REGISTRY[state.viz_index]->apply_defaults(&state.cam);
 }
 
 static void init(void) {
@@ -340,11 +99,6 @@ static void init(void) {
     });
 
     state.seed = parse_seed_hex(sargs_value_def("seed", "00000000"));
-    seed_to_initial_state(state.seed);
-    apply_url_overrides();
-    state.yaw0      = state.yaw;
-    state.pitch0    = state.pitch;
-    state.distance0 = state.distance;
 
     const char *g = sargs_value_def("gpu", "");
     strncpy(state.gpu, g, sizeof(state.gpu) - 1);
@@ -352,37 +106,30 @@ static void init(void) {
     state.show_overlay = false;
 
     float verts[] = { -1.0f, -3.0f, -1.0f, 1.0f, 3.0f, 1.0f };
-    state.bind.vertex_buffers[0] = sg_make_buffer(&(sg_buffer_desc){
+    state.fullscreen_tri = sg_make_buffer(&(sg_buffer_desc){
         .data = SG_RANGE(verts), .label = "fullscreen-tri",
     });
 
-    sg_shader shd = sg_make_shader(&(sg_shader_desc){
-        .vertex_func.source   = vs_src,
-        .fragment_func.source = fs_src,
-        .attrs = { [0] = { .glsl_name = "pos" } },
-        .uniform_blocks[0] = {
-            .stage  = SG_SHADERSTAGE_FRAGMENT,
-            .size   = sizeof(fs_params_t),
-            .layout = SG_UNIFORMLAYOUT_NATIVE,
-            .glsl_uniforms = {
-                [0] = { .glsl_name = "cam_pos",    .type = SG_UNIFORMTYPE_FLOAT3 },
-                [1] = { .glsl_name = "cam_target", .type = SG_UNIFORMTYPE_FLOAT3 },
-                [2] = { .glsl_name = "aspect",     .type = SG_UNIFORMTYPE_FLOAT  },
-                [3] = { .glsl_name = "param",      .type = SG_UNIFORMTYPE_FLOAT  },
-                [4] = { .glsl_name = "fov_scale",  .type = SG_UNIFORMTYPE_FLOAT  },
-                [5] = { .glsl_name = "kind",       .type = SG_UNIFORMTYPE_INT    },
-                [6] = { .glsl_name = "palette_id", .type = SG_UNIFORMTYPE_INT    },
-                [7] = { .glsl_name = "iter_boost", .type = SG_UNIFORMTYPE_INT    },
-            },
-        },
-        .label = "fractal-shader",
-    });
+    // Build every registered viz up front so menu switching is instant.
+    // Each viz's init() seeds its own defaults so toggling to a non-active
+    // viz via the menu shows reasonable params rather than zeros.
+    for (int i = 0; i < VIZ_COUNT; i++) VIZ_REGISTRY[i]->init();
 
-    state.pip = sg_make_pipeline(&(sg_pipeline_desc){
-        .shader = shd,
-        .layout = { .attrs = { [0].format = SG_VERTEXFORMAT_FLOAT2 } },
-        .label  = "fractal-pipeline",
-    });
+    state.viz_index = 0;
+    if (sargs_exists("viz")) {
+        int idx = viz_index_for_token(sargs_value("viz"));
+        if (idx >= 0) state.viz_index = idx;
+    }
+
+    // Order matters: apply_defaults reseeds params + sets the camera home;
+    // url_overrides runs after so query-string args win over the seed.
+    VIZ_REGISTRY[state.viz_index]->apply_defaults(&state.cam);
+    for (int i = 0; i < VIZ_COUNT; i++) VIZ_REGISTRY[i]->url_overrides();
+
+    // ?yaw / ?pitch / ?dist apply to whichever viz ends up active.
+    if (sargs_exists("dist"))  state.cam.distance = (float)atof(sargs_value("dist"));
+    if (sargs_exists("yaw"))   state.cam.yaw      = (float)atof(sargs_value("yaw"));
+    if (sargs_exists("pitch")) state.cam.pitch    = (float)atof(sargs_value("pitch"));
 
     state.pass_action = (sg_pass_action){
         .colors[0] = { .load_action = SG_LOADACTION_DONTCARE },
@@ -391,17 +138,17 @@ static void init(void) {
 
 static void orbit(float dx_px, float dy_px) {
     const float kSensitivity = 0.005f;
-    state.yaw   -= dx_px * kSensitivity;
-    state.pitch += dy_px * kSensitivity;
+    state.cam.yaw   -= dx_px * kSensitivity;
+    state.cam.pitch += dy_px * kSensitivity;
     const float lim = PI * 0.5f - 0.01f;
-    if (state.pitch >  lim) state.pitch =  lim;
-    if (state.pitch < -lim) state.pitch = -lim;
+    if (state.cam.pitch >  lim) state.cam.pitch =  lim;
+    if (state.cam.pitch < -lim) state.cam.pitch = -lim;
 }
 
 static void dolly(float factor) {
-    state.distance *= factor;
-    if (state.distance < 0.001f) state.distance = 0.001f;
-    if (state.distance > 10.0f)  state.distance = 10.0f;
+    state.cam.distance *= factor;
+    if (state.cam.distance < 0.001f) state.cam.distance = 0.001f;
+    if (state.cam.distance > 10.0f)  state.cam.distance = 10.0f;
 }
 
 static void event(const sapp_event *e) {
@@ -476,15 +223,44 @@ static void event(const sapp_event *e) {
             }
             break;
         case SAPP_EVENTTYPE_KEY_DOWN:
-            if (e->key_code == SAPP_KEYCODE_R) {
-                state.yaw      = state.yaw0;
-                state.pitch    = state.pitch0;
-                state.distance = state.distance0;
+            if (state.show_menu) {
+                switch (e->key_code) {
+                    case SAPP_KEYCODE_UP:
+                    case SAPP_KEYCODE_W:
+                        state.menu_sel = (state.menu_sel - 1 + VIZ_COUNT) % VIZ_COUNT;
+                        break;
+                    case SAPP_KEYCODE_DOWN:
+                    case SAPP_KEYCODE_S:
+                        state.menu_sel = (state.menu_sel + 1) % VIZ_COUNT;
+                        break;
+                    case SAPP_KEYCODE_ENTER:
+                    case SAPP_KEYCODE_SPACE:
+                        switch_viz(state.menu_sel);
+                        state.show_menu = false;
+                        break;
+                    case SAPP_KEYCODE_ESCAPE:
+                    case SAPP_KEYCODE_M:
+                        state.show_menu = false;
+                        break;
+                    default:
+                        break;
+                }
+                break;
+            }
+            if (e->key_code == SAPP_KEYCODE_M) {
+                state.show_menu = true;
+                state.menu_sel = state.viz_index;
+            } else if (e->key_code == SAPP_KEYCODE_R) {
+                state.cam.yaw      = state.cam.yaw0;
+                state.cam.pitch    = state.cam.pitch0;
+                state.cam.distance = state.cam.distance0;
                 state.auto_zoom = false;
             } else if (e->key_code == SAPP_KEYCODE_H) {
                 state.show_overlay = !state.show_overlay;
             } else if (e->key_code == SAPP_KEYCODE_Z) {
-                state.auto_zoom = !state.auto_zoom;
+                if (VIZ_REGISTRY[state.viz_index]->supports_auto_zoom) {
+                    state.auto_zoom = !state.auto_zoom;
+                }
             }
             break;
         default:
@@ -492,54 +268,71 @@ static void event(const sapp_event *e) {
     }
 }
 
-static void frame(void) {
-    if (state.auto_zoom) {
-        float dt = (float)sapp_frame_duration();
-        state.distance *= expf(-dt * 0.25f);
-        state.yaw += dt * 0.18f;
-        if (state.distance < 0.001f) state.distance = state.distance0;
+static void draw_overlay(void) {
+    sdtx_canvas(sapp_widthf() * 0.5f, sapp_heightf() * 0.5f);
+    sdtx_origin(1.0f, 1.0f);
+    sdtx_home();
+    sdtx_font(0);
+    sdtx_color3b(0xd8, 0xe0, 0xe6);
+    sdtx_printf("YOUR SOKOL VIZ\n");
+    sdtx_color3b(0x80, 0x88, 0x90);
+    sdtx_printf("\n");
+    sdtx_printf("viz      %s\n", VIZ_REGISTRY[state.viz_index]->name);
+
+    VIZ_REGISTRY[state.viz_index]->overlay();
+
+    sdtx_color3b(0x80, 0x88, 0x90);
+    sdtx_printf("camera   yaw %+0.3f  pitch %+0.3f  zoom %.1fx%s\n",
+                (double)state.cam.yaw, (double)state.cam.pitch,
+                (double)(state.cam.distance0 / state.cam.distance),
+                state.auto_zoom ? "  [auto]" : "");
+    sdtx_printf("gpu      %s\n", state.gpu[0] ? state.gpu : "?");
+    sdtx_color3b(0x50, 0x58, 0x60);
+    sdtx_printf("\ndrag orbit  scroll/pinch dolly%s  R reset  H hide  M menu",
+                VIZ_REGISTRY[state.viz_index]->supports_auto_zoom ? "  Z auto-zoom" : "");
+    sdtx_draw();
+}
+
+static void draw_menu(void) {
+    sdtx_canvas(sapp_widthf() * 0.5f, sapp_heightf() * 0.5f);
+    sdtx_origin(2.0f, 2.0f);
+    sdtx_home();
+    sdtx_font(0);
+    sdtx_color3b(0xd8, 0xe0, 0xe6);
+    sdtx_printf("== VISUALIZATION ==\n\n");
+    for (int i = 0; i < VIZ_COUNT; i++) {
+        bool sel    = (i == state.menu_sel);
+        bool active = (i == state.viz_index);
+        if (sel) sdtx_color3b(0xd8, 0xe0, 0xe6);
+        else     sdtx_color3b(0x80, 0x88, 0x90);
+        sdtx_printf("%s %s", sel ? ">" : " ", VIZ_REGISTRY[i]->name);
+        if (active) {
+            sdtx_color3b(0x60, 0x80, 0x60);
+            sdtx_printf("  [active]");
+        }
+        sdtx_printf("\n");
     }
+    sdtx_color3b(0x50, 0x58, 0x60);
+    sdtx_printf("\nup/down select   ENTER apply   M close");
+    sdtx_draw();
+}
 
-    state.params.aspect = sapp_widthf() / sapp_heightf();
-    state.params.fov_scale = state.distance0 / fmaxf(state.distance, 1e-6f);
+static void frame(void) {
+    state.time_accum += sapp_frame_duration();
 
-    float zoom_decades = log2f(state.params.fov_scale);
-    int boost = (int)(zoom_decades * 1.5f);
-    if (boost < 0)  boost = 0;
-    if (boost > 12) boost = 12;
-    state.params.iter_boost = boost;
-
-    update_cam_pos();
+    if (state.auto_zoom && VIZ_REGISTRY[state.viz_index]->supports_auto_zoom) {
+        float dt = (float)sapp_frame_duration();
+        state.cam.distance *= expf(-dt * 0.25f);
+        state.cam.yaw      += dt * 0.18f;
+        if (state.cam.distance < 0.001f) state.cam.distance = state.cam.distance0;
+    }
 
     sg_begin_pass(&(sg_pass){ .action = state.pass_action, .swapchain = sglue_swapchain() });
-    sg_apply_pipeline(state.pip);
-    sg_apply_bindings(&state.bind);
-    sg_apply_uniforms(0, &SG_RANGE(state.params));
-    sg_draw(0, 3, 1);
 
-    if (state.show_overlay) {
-        sdtx_canvas(sapp_widthf() * 0.5f, sapp_heightf() * 0.5f);
-        sdtx_origin(1.0f, 1.0f);
-        sdtx_home();
-        sdtx_font(0);
-        sdtx_color3b(0xd8, 0xe0, 0xe6);
-        sdtx_printf("YOUR SOKOL FRACTAL\n");
-        sdtx_color3b(0x80, 0x88, 0x90);
-        sdtx_printf("\n");
-        sdtx_printf("seed     %08x\n", state.seed);
-        sdtx_printf("type     %s\n", KIND_NAMES[state.params.kind]);
-        sdtx_printf("palette  %s\n", PALETTE_NAMES[state.params.palette_id]);
-        sdtx_printf("%-8s %.3f\n", PARAM_LABELS[state.params.kind], (double)state.params.param);
-        sdtx_printf("camera   yaw %+0.3f  pitch %+0.3f  zoom %.1fx%s\n",
-                    (double)state.yaw, (double)state.pitch,
-                    (double)(state.distance0 / state.distance),
-                    state.auto_zoom ? "  [auto]" : "");
-        sdtx_printf("iters    +%d boost\n", state.params.iter_boost);
-        sdtx_printf("gpu      %s\n", state.gpu[0] ? state.gpu : "?");
-        sdtx_color3b(0x50, 0x58, 0x60);
-        sdtx_printf("\ndrag orbit  scroll/pinch dolly  Z auto-zoom  R reset  H hide");
-        sdtx_draw();
-    }
+    VIZ_REGISTRY[state.viz_index]->draw(&state.cam, state.time_accum);
+
+    if (state.show_overlay) draw_overlay();
+    if (state.show_menu)    draw_menu();
 
     sg_end_pass();
     sg_commit();
@@ -561,7 +354,7 @@ sapp_desc sokol_main(int argc, char *argv[]) {
         .width = 1024,
         .height = 720,
         .sample_count = 1,
-        .window_title = "your sokol fractal",
+        .window_title = "your sokol viz",
         .icon.sokol_default = true,
         .logger.func = slog_func,
     };
