@@ -82,12 +82,16 @@ static void switch_viz(int idx) {
     state.auto_zoom = false;
 }
 
-// Called from JS on a device-motion shake. Bumps the seed forward and
-// re-applies the active viz's defaults so the shaking visibly resets the
-// camera (and, for the fractal viz, picks a new fractal).
-WASM_EXPORT void next_fractal(void) {
+// Called from JS on a device-motion shake. Bumps the seed AND advances
+// the active visualization, then re-applies defaults — so every shake is
+// a visible change: fractal -> volcano -> different fractal -> volcano.
+// On mobile this is the primary discovery gesture for the volcano viz,
+// since there's no keyboard to press M.
+WASM_EXPORT void next_viz(void) {
     state.seed += 0x9E3779B1u;  // golden-ratio constant; well-distributed step
+    state.viz_index = (state.viz_index + 1) % VIZ_COUNT;
     VIZ_REGISTRY[state.viz_index]->apply_defaults(&state.cam);
+    state.auto_zoom = false;
 }
 
 static void init(void) {

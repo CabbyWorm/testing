@@ -46,6 +46,11 @@ FOV), **R** resets to the home framing, **H** toggles the overlay,
 **Z** toggles auto-zoom (fractal viz only), and **M** opens the
 visualization menu (↑/↓ select, **Enter** apply, **Esc**/**M** close).
 
+On mobile, **shake the device** to cycle to the next visualization
+(fractal ↔ volcano) with a fresh seed — every shake is a visible change.
+On iOS Safari, tap the "tap to enable shake-to-switch" pill once to grant
+motion permission.
+
 ## Layout
 
 ```
