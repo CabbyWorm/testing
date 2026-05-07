@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
-  <title>your sokol fractal</title>
+  <title>your sokol viz</title>
   <style>
     html, body {
       margin: 0;
@@ -57,7 +57,7 @@
 </head>
 <body>
   <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
-  <div id="status">computing your fractal…</div>
+  <div id="status">loading…</div>
   <button id="motion-gate" class="hidden" type="button">tap to enable shake-to-switch</button>
 
   <script>
@@ -134,11 +134,14 @@
       console.error(msg);
     };
 
-    // Shake the device -> jump to a new fractal. Calls into the wasm-exported
-    // next_fractal() once the runtime is up. iOS Safari requires
-    // DeviceMotionEvent.requestPermission() to be invoked from the click
-    // handler of an explicit user-tapped element — Sokol's canvas eats the
-    // touchstart before it bubbles, so we use a small dedicated button.
+    // Shake the device -> cycle to the next visualization (fractal ↔
+    // volcano) with a fresh seed. This is the mobile discovery gesture
+    // for switching viz, since there's no keyboard to press M. Calls
+    // into the wasm-exported next_viz() once the runtime is up. iOS
+    // Safari requires DeviceMotionEvent.requestPermission() to be
+    // invoked from the click handler of an explicit user-tapped
+    // element — Sokol's canvas eats the touchstart before it bubbles,
+    // so we use a small dedicated button.
     (function () {
       var gateEl = document.getElementById('motion-gate');
       var lastA = null;
@@ -155,7 +158,7 @@
           var now = Date.now();
           if (delta > SHAKE_THRESHOLD && now - lastShakeAt > SHAKE_DEBOUNCE_MS) {
             lastShakeAt = now;
-            try { if (Module && Module._next_fractal) Module._next_fractal(); }
+            try { if (Module && Module._next_viz) Module._next_viz(); }
             catch (err) { console.error(err); }
           }
         }
@@ -166,7 +169,7 @@
         attached = true;
         window.addEventListener('devicemotion', onMotion, { passive: true });
         gateEl.classList.add('hidden');
-        console.log('[fractal] devicemotion listener attached');
+        console.log('[viz] devicemotion listener attached');
       }
       var hasMotion = typeof DeviceMotionEvent !== 'undefined';
       var needsPermission = hasMotion && typeof DeviceMotionEvent.requestPermission === 'function';
@@ -186,7 +189,7 @@
               gateEl.textContent = 'motion access denied — check Safari → Motion settings';
             }
           }).catch(function (err) {
-            console.error('[fractal] requestPermission rejected:', err);
+            console.error('[viz] requestPermission rejected:', err);
             gateEl.textContent = 'could not enable motion';
           });
         });

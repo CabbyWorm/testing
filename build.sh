@@ -22,7 +22,7 @@ emcc \
   -s ALLOW_MEMORY_GROWTH=1 \
   -s WASM=1 \
   -s ENVIRONMENT=web \
-  -s EXPORTED_FUNCTIONS='["_main","_next_fractal"]' \
+  -s EXPORTED_FUNCTIONS='["_main","_next_viz"]' \
   --shell-file "$ROOT_DIR/src/shell.html" \
   -o "$OUT_DIR/index.html"
 
